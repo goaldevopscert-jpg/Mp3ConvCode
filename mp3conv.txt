@@ -1,0 +1,123 @@
+
+import argparse
+import os
+from io import BytesIO
+import speech_recognition as sr
+from fpdf import FPDF
+from pydub import AudioSegment
+from pydub.silence import split_on_silence
+
+class PDF(FPDF):
+    """
+    Custom PDF class to add a header and footer to each page.
+    """
+    def header(self):
+        self.set_font('Arial', 'B', 12)
+        self.cell(0, 10, 'Audio Transcription', 0, 1, 'C')
+        self.ln(10) # Add a little space after the header
+    def footer(self):
+        self.set_y(-15)
+        self.set_font('Arial', 'I', 8)
+        self.cell(0, 10, f'Page {self.page_no()}', 0, 0, 'C')
+
+def transcribe_audio_with_chunking(path: str) -> str:
+    """
+    Transcribes an audio file by splitting it into chunks based on silence
+    and using Google's Web Speech API for transcription.
+    Args:
+        path: The path to the audio file.
+    Returns:
+        The full transcribed text as a single string.
+    """
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Audio file not found at: {path}")
+    print("Loading audio file...")
+    sound = AudioSegment.from_file(path)
+    print("Splitting audio into chunks based on silence...")
+    # These parameters may need to be adjusted based on your audio quality
+    chunks = split_on_silence(
+        sound,
+        min_silence_len=700,      # A silence of at least 700ms
+        silence_thresh=sound.dBFS - 16, # Anything 16dB below the max volume
+        keep_silence=300,         # Keep 300ms of silence at the start/end
+    )
+    if not chunks:
+        print("No speech detected in the audio. Could not split into chunks.")
+        return ""
+    recognizer = sr.Recognizer()
+    full_text = ""
+    print(f"Processing {len(chunks)} audio chunks...")
+    for i, audio_chunk in enumerate(chunks, start=1):
+        # Export chunk to an in-memory WAV file
+        wav_io = BytesIO()
+        audio_chunk.export(wav_io, format="wav")
+        wav_io.seek(0)
+        with sr.AudioFile(wav_io) as source:
+            audio_listened = recognizer.record(source)
+            try:
+                # Use Google's free web API for transcription
+                text = recognizer.recognize_google(audio_listened)
+                print(f"  Chunk {i}/{len(chunks)} transcribed successfully.")
+                full_text += text + " "
+            except sr.UnknownValueError:
+                print(f"  Chunk {i}/{len(chunks)}: Google Speech Recognition could not understand audio.")
+            except sr.RequestError as e:
+                print(f"  Chunk {i}/{len(chunks)}: Could not request results from Google API; {e}")
+    return full_text.strip()
+
+def create_pdf(text: str, filename: str):
+    """
+    Creates a PDF document with the provided text.
+    Args:
+        text: The text content to write to the PDF.
+        filename: The name of the output PDF file.
+    """
+    pdf = PDF()
+    pdf.add_page()
+    pdf.set_font("Arial", size=12)
+    # FPDF's default font uses 'latin-1' encoding. We need to handle
+    # characters that are not supported by replacing them.
+    safe_text = text.encode('latin-1', 'replace').decode('latin-1')
+    pdf.multi_cell(0, 8, safe_text)
+    try:
+        pdf.output(filename)
+        print(f"\nSuccessfully created PDF: {filename}")
+    except Exception as e:
+        print(f"\nError creating PDF: {e}")
+
+def main():
+    """
+    Main function to parse command-line arguments and run the conversion process.
+    """
+    parser = argparse.ArgumentParser(
+        description="Convert an audio file's content to a PDF document.",
+        formatter_class=argparse.RawTextHelpFormatter
+    )
+    parser.add_argument(
+        "audio_file",
+        help="Path to the input audio file (e.g., my_audio.mp3, recording.wav)."
+    )
+    parser.add_argument(
+        "pdf_file",
+        help="Path for the output PDF file (e.g., transcript.pdf)."
+    )
+    args = parser.parse_args()
+    input_path = args.audio_file
+    output_path = args.pdf_file
+    try:
+        print("-" * 50)
+        print(f"Starting transcription for '{input_path}'...")
+        transcribed_text = transcribe_audio_with_chunking(input_path)
+        if transcribed_text:
+            print("\nTranscription complete. Creating PDF...")
+            create_pdf(transcribed_text, output_path)
+        else:
+            print("\nTranscription returned no text. PDF will not be created.")
+        print("-" * 50)
+    except FileNotFoundError as e:
+        print(f"\n[ERROR] {e}")
+    except Exception as e:
+        print(f"\n[ERROR] An unexpected error occurred: {e}")
+
+if __name__ == "__main__":
+    main()
